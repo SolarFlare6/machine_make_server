@@ -1,0 +1,34 @@
+{
+  "654321": {
+    "pairing_code": "654321",
+    "client_name": "Flutter App",
+    "client_id": null,
+    "created_at": 1790553626.348843,
+    "expires_at": 1790553926.348843,
+    "claimed_by": null
+  },
+  "123456": {
+    "pairing_code": "123456",
+    "client_name": "Test Mobile",
+    "client_id": null,
+    "created_at": 1790553626.5403175,
+    "expires_at": 1790553686.5403175,
+    "claimed_by": null
+  },
+  "839214": {
+    "pairing_code": "839214",
+    "client_name": "Damjan's Phone",
+    "client_id": null,
+    "created_at": 1790553626.595396,
+    "expires_at": 1790553686.6063972,
+    "claimed_by": "phone-damjan"
+  },
+  "777888": {
+    "pairing_code": "777888",
+    "client_name": "Test Phone",
+    "client_id": null,
+    "created_at": 1790553626.6812818,
+    "expires_at": 1790553686.694166,
+    "claimed_by": "test-phone-repeat"
+  }
+}

@@ -101,9 +101,62 @@ async def demo(client_id: str) -> None:
                 break
 
 
+async def pair_online(client_id: str = "demo-client-1", name: str = "Example Client", method: str = "wifi") -> None:
+    """Pairs directly over DCP WebSocket connection, triggering the server's terminal confirmation prompt."""
+    async with websockets.connect(SERVER_URL) as ws:
+        msg = {
+            "dcp": "1.0",
+            "type": "request",
+            "id": 1,
+            "command": "request_pairing",
+            "arguments": {
+                "client_id": client_id,
+                "client_name": name,
+                "method": method,
+            },
+        }
+        print(f"[client] sending pairing request ({method}) for {name} ({client_id})...")
+        await ws.send(json.dumps(msg))
+        resp = json.loads(await ws.recv())
+        print("Pairing response:", json.dumps(resp, indent=2))
+
+
+async def pair_qr(pairing_code: str, client_id: str = "demo-client-1", name: str = "Example Client") -> None:
+    """Pairs over DCP WebSocket connection using a QR code pairing PIN."""
+    async with websockets.connect(SERVER_URL) as ws:
+        msg = {
+            "dcp": "1.0",
+            "type": "request",
+            "id": 1,
+            "command": "request_pairing",
+            "arguments": {
+                "client_id": client_id,
+                "client_name": name,
+                "method": "qr",
+                "pairing_code": pairing_code,
+            },
+        }
+        print(f"[client] verifying QR pairing code '{pairing_code}' for {name} ({client_id})...")
+        await ws.send(json.dumps(msg))
+        resp = json.loads(await ws.recv())
+        print("QR Pairing response:", json.dumps(resp, indent=2))
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "pair":
         asyncio.run(pair())
+    elif len(sys.argv) > 1 and sys.argv[1] == "pair-online":
+        cid = sys.argv[2] if len(sys.argv) > 2 else "demo-client-1"
+        cname = sys.argv[3] if len(sys.argv) > 3 else "Example Client"
+        asyncio.run(pair_online(cid, cname))
+    elif len(sys.argv) > 1 and sys.argv[1] == "pair-qr":
+        if len(sys.argv) < 3:
+            print("Usage: python example_client.py pair-qr <pairing_code> [client_id] [client_name]")
+            sys.exit(1)
+        code = sys.argv[2]
+        cid = sys.argv[3] if len(sys.argv) > 3 else "demo-client-1"
+        cname = sys.argv[4] if len(sys.argv) > 4 else "Example Client"
+        asyncio.run(pair_qr(code, cid, cname))
     else:
         client_id = sys.argv[1] if len(sys.argv) > 1 else "demo-client-1"
         asyncio.run(demo(client_id))

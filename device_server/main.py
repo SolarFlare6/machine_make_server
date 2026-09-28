@@ -22,9 +22,11 @@ Run with:  python main.py
 Stop with: Ctrl+C
 """
 
+import argparse
 import asyncio
 import logging
 import signal
+import sys
 
 from auth import Authenticator, TrustStore
 from capability_mapper import CapabilityMapper
@@ -41,6 +43,7 @@ from safety_manager import SafetyManager
 from session import SessionManager
 from task_manager import TaskManager
 from tool_registry import ToolRegistry
+from transports.bluetooth_transport import BluetoothDCPServer
 from transports.websocket_transport import WiFiDCPServer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -49,7 +52,128 @@ logger = logging.getLogger("main")
 WIFI_PORT = 8765
 
 
-async def run() -> None:
+async def console_loop(
+    pairing_manager: PairingManager,
+    stop_event: asyncio.Event,
+    trust_store: TrustStore,
+    session_manager: SessionManager,
+    identity: DeviceIdentity,
+) -> None:
+    """Non-blocking interactive console reader so the user can input commands
+    (like 'qr' to generate a pairing QR code) while the server is running."""
+    loop = asyncio.get_running_loop()
+
+    # If stdin is not an interactive terminal (e.g. background service), do not block
+    if not sys.stdin.isatty():
+        return
+
+    banner = (
+        "\n" + "=" * 68 + "\n"
+        "  MACHINE MAKE DEVICE SERVER CONSOLE\n"
+        "  Type 'qr' to generate a pairing QR code for the mobile app.\n"
+        "  Commands:\n"
+        "    qr [name]    - Generate & display QR pairing code (ASCII + PNG)\n"
+        "    devices      - List paired devices and active sessions\n"
+        "    status       - Show device status and server info\n"
+        "    help         - Show available commands\n"
+        "    exit / quit  - Stop the server\n"
+        + "=" * 68 + "\n"
+    )
+    print(banner)
+
+    while not stop_event.is_set():
+        try:
+            line = await loop.run_in_executor(None, lambda: input("[server]> "))
+        except (EOFError, KeyboardInterrupt):
+            stop_event.set()
+            break
+        except Exception:
+            break
+
+        if stop_event.is_set():
+            break
+
+        cmd_parts = line.strip().split(maxsplit=1)
+        if not cmd_parts:
+            continue
+        cmd = cmd_parts[0].lower()
+        arg = cmd_parts[1] if len(cmd_parts) > 1 else ""
+
+        if cmd in ("exit", "quit", "q"):
+            stop_event.set()
+            break
+        elif cmd == "qr":
+            client_name = arg or "Mobile App"
+            pairing_manager.generate_qr_pairing(client_name=client_name)
+        elif cmd in ("devices", "paired"):
+            print("\n--- Paired Devices (TrustStore) ---")
+            trusted = trust_store._trusted
+            if not trusted:
+                print("  No devices paired yet. Run 'qr' to pair a mobile app.")
+            for cid, data in trusted.items():
+                print(f"  - {cid}: {data.get('name')} (permission: {data.get('permission')})")
+            print(f"--- Active Sessions: {len(session_manager.all_sessions())} ---")
+            for s in session_manager.all_sessions():
+                print(f"  - Session {s.session_id}: client={s.client_id} auth={s.authenticated} control={s.has_control}")
+            print()
+        elif cmd == "status":
+            print(f"\nDevice ID: {identity.device_id}")
+            print(f"Name:      {identity.name}")
+            print(f"Profile:   {identity.profile}")
+            print(f"Active sessions: {len(session_manager.all_sessions())}\n")
+        elif cmd == "help":
+            print("\nAvailable commands:")
+            print("  qr [name]    - Generate pairing QR code and display in terminal")
+            print("  devices      - List paired devices in TrustStore and active sessions")
+            print("  status       - Show device identity & status")
+            print("  exit / quit  - Stop the server\n")
+        else:
+            print(f"Unknown command '{cmd}'. Type 'qr' to generate QR code, or 'help' for options.")
+
+
+async def telemetry_loop(
+    event_manager: EventManager,
+    session_manager: SessionManager,
+    stop_event: asyncio.Event,
+    interval_s: float = 2.5,
+) -> None:
+    """Periodically emits telemetry events to connected sessions subscribed to 'telemetry'."""
+    while not stop_event.is_set():
+        try:
+            await asyncio.sleep(interval_s)
+            if not session_manager.sessions_subscribed_to("telemetry"):
+                continue
+
+            cpu_val = 15.0
+            ram_val = 35.0
+            try:
+                import psutil
+                cpu_val = float(psutil.cpu_percent(interval=None))
+                ram_val = float(psutil.virtual_memory().percent)
+            except Exception:
+                pass
+
+            telemetry_data = {
+                "cpu": cpu_val,
+                "ram": ram_val,
+                "gpu": 0.0,
+                "temp": 42.5,
+                "battery": 88.0,
+            }
+            await event_manager.emit("telemetry", telemetry_data)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.debug("telemetry loop error: %s", exc)
+
+
+async def run(
+    auto_qr: bool = False,
+    qr_name: str = "Mobile App",
+    port: int = WIFI_PORT,
+    pairing_manager: PairingManager = None,
+    trust_store: TrustStore = None,
+) -> None:
     # 2-3. Device identity + security keys
     config = ConfigurationManager()
     identity_cfg = config.identity
@@ -71,8 +195,7 @@ async def run() -> None:
     physical_config = config.physical_configuration
 
     # Robot Controller: the "software module" the Capability Mapper needs
-    # to unlock movement capabilities (device_server_hardware_mapper.txt
-    # section 23). Swap or omit this for non-robot devices.
+    # to unlock movement capabilities (device_server_hardware_mapper.txt section 23).
     robot_controller = RobotController(physical_config)
 
     # 7. Capability Map
@@ -86,14 +209,17 @@ async def run() -> None:
     logger.info("registered tools: %s", list(tool_registry.all_tools().keys()))
 
     # Supporting managers used by the DCP Handler / Device Agent pipeline.
-    trust_store = TrustStore()
+    trust_store = trust_store or TrustStore()
     authenticator = Authenticator(trust_store)
     session_manager = SessionManager()
     safety_manager = SafetyManager()
-    event_manager = EventManager(session_manager)
+    event_manager = EventManager(session_manager, identity=identity)
     task_manager = TaskManager(event_manager, safety_manager)
     device_agent = DeviceAgent(tool_registry, safety_manager, task_manager)
-    pairing_manager = PairingManager(trust_store)
+    if pairing_manager is None:
+        pairing_manager = PairingManager(trust_store, identity=identity)
+    else:
+        pairing_manager.set_identity(identity)
 
     dcp_handler = DCPHandler(
         identity=identity,
@@ -106,42 +232,30 @@ async def run() -> None:
         trust_store=trust_store,
         authenticator=authenticator,
         capabilities=capabilities,
+        pairing_manager=pairing_manager,
     )
 
     # 9. Start Wi-Fi DCP server (WebSocket over TCP)
-    wifi_server = WiFiDCPServer(dcp_handler, session_manager, port=WIFI_PORT)
+    wifi_server = WiFiDCPServer(dcp_handler, session_manager, port=port)
     await wifi_server.start()
 
-    # 10. Bluetooth DCP server -- not implemented in this reference
-    # implementation. A real deployment would add a BLE GATT peripheral
-    # here (e.g. via `bleak`/`bluezero` on Linux) that decodes/reassembles
-    # fragmented DCP JSON frames and hands the resulting dict to the same
-    # dcp_handler.handle(session, message) used above -- transport
-    # independence (protocol spec section 33) means no other code changes.
-    logger.info("Bluetooth DCP server not implemented in this reference build (see README.md)")
+    # 10. Start Bluetooth DCP server (GATT peripheral with fragmentation/reassembly)
+    bluetooth_server = BluetoothDCPServer(dcp_handler, session_manager)
+    await bluetooth_server.start()
 
-    # 11. Discovery / advertising
+    # 11. Discovery / advertising (mDNS + BLE)
     advertiser = DiscoveryAdvertiser(
         device_id=identity.device_id,
         profile=identity.profile,
-        port=WIFI_PORT,
+        port=port,
     )
     advertiser.start()
 
-    # 12. Optional Needle -- out of scope here. Needle would connect to
-    # this same server as just another authenticated DCP client (either
-    # embedded in-process on a capable device, per
-    # device_server_hardware_mapper.txt section 31, or running on the
-    # phone per section 32), calling execute_tool the same way any other
-    # client does.
+    logger.info("Device Server ready. Waiting for clients on port %s.", port)
 
-    # Expose a manual pairing entry point for operators/testers: run
-    #   python -c "import asyncio, main; asyncio.run(main.pair_client('phone-1', 'My Phone', 'wifi'))"
-    # or wire PairingManager.request_pairing into whatever out-of-band
-    # channel (QR, terminal, admin API) your deployment uses to *initiate*
-    # a pairing request.
-
-    logger.info("Device Server ready. Waiting for clients on port %s.", WIFI_PORT)
+    # Optional immediate QR code generation if requested via CLI flag
+    if auto_qr:
+        pairing_manager.generate_qr_pairing(client_name=qr_name, port=port)
 
     stop_event = asyncio.Event()
 
@@ -155,12 +269,39 @@ async def run() -> None:
         except NotImplementedError:
             pass  # e.g. Windows
 
+    # Start non-blocking interactive console reader
+    console_task = asyncio.create_task(
+        console_loop(pairing_manager, stop_event, trust_store, session_manager, identity)
+    )
+
+    # Start periodic telemetry emitter
+    telemetry_task = asyncio.create_task(
+        telemetry_loop(event_manager, session_manager, stop_event)
+    )
+
     await stop_event.wait()
 
     logger.info("shutting down")
+    telemetry_task.cancel()
+    console_task.cancel()
     advertiser.stop()
+    await bluetooth_server.stop()
     await wifi_server.stop()
 
 
+def main():
+    parser = argparse.ArgumentParser(description="Machine Make Device Server")
+    parser.add_argument("--qr", action="store_true", help="Generate and display a pairing QR code on startup")
+    parser.add_argument("--qr-name", default="Mobile App", help="Client name for QR pairing invitation")
+    parser.add_argument("--port", type=int, default=WIFI_PORT, help="Wi-Fi WebSocket port (default: 8765)")
+    args = parser.parse_args()
+
+    try:
+        asyncio.run(run(auto_qr=args.qr, qr_name=args.qr_name, port=args.port))
+    except (KeyboardInterrupt, SystemExit):
+        pass
+
+
 if __name__ == "__main__":
-    asyncio.run(run())
+    main()
+

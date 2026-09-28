@@ -1,1 +1,7 @@
-{}
+{
+  "1dc09924-bf8b-44ae-ab4b-dcd85d0a8ed3": {
+    "secret": "3a7c49f732037f3a80a2cea2bdb0e4e9b35e7245d15fccfb1d9c8def6a989ce8",
+    "name": "MachineMake App",
+    "permission": "CONTROL"
+  }
+}

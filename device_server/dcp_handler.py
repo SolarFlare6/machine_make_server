@@ -12,6 +12,7 @@ dict (see transports/).
 """
 
 import logging
+import time
 from typing import Any, Dict, Optional
 
 from auth import Authenticator, TrustStore
@@ -30,7 +31,10 @@ SUPPORTED_VERSIONS = {"1.0"}
 
 # Shortcut commands that map 1:1 onto execute_tool() with no extra
 # arguments beyond what's already given (protocol spec section 17).
-_SHORTCUT_COMMANDS = {"stand", "sit", "take_picture", "get_orientation"}
+_SHORTCUT_COMMANDS = {
+    "stand", "sit", "take_picture", "get_orientation",
+    "emergency_stop", "camera_snapshot", "get_battery",
+}
 
 
 class DCPHandler:
@@ -38,7 +42,8 @@ class DCPHandler:
                  config: ConfigurationManager, tool_registry: ToolRegistry,
                  device_agent: DeviceAgent, task_manager: TaskManager,
                  session_manager: SessionManager, trust_store: TrustStore,
-                 authenticator: Authenticator, capabilities: list):
+                 authenticator: Authenticator, capabilities: list,
+                 pairing_manager=None):
         self._identity = identity
         self._hardware_mapper = hardware_mapper
         self._config = config
@@ -49,6 +54,7 @@ class DCPHandler:
         self._trust_store = trust_store
         self._auth = authenticator
         self._capabilities = capabilities
+        self._pairing = pairing_manager
 
     async def handle(self, session: Session, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Dispatches one incoming DCP request and returns the response
@@ -59,7 +65,7 @@ class DCPHandler:
             return self._error(None, "INVALID_REQUEST", "Only 'request' messages are handled here.")
 
         request_id = message.get("id")
-        version = message.get("dcp")
+        version = str(message.get("dcp", DCP_VERSION))
         if version not in SUPPORTED_VERSIONS:
             return self._error(request_id, "INVALID_REQUEST",
                                 f"Unsupported DCP version '{version}'.")
@@ -67,7 +73,22 @@ class DCPHandler:
         command = message.get("command")
         arguments = message.get("arguments", {}) or {}
 
+        logger.info("Session %s incoming command: '%s' (id=%s)", session.session_id, command, request_id)
+
         try:
+            if command in ("request_pairing", "pair"):
+                return await self._handle_request_pairing(session, request_id, arguments)
+            if command == "negotiate":
+                selected = arguments.get("selected_version", "1.0")
+                return self._simple_response(request_id, {
+                    "negotiated_version": selected if selected in SUPPORTED_VERSIONS else "1.0",
+                    "supported_versions": sorted(list(SUPPORTED_VERSIONS)),
+                })
+            if command == "ping":
+                return self._simple_response(request_id, {
+                    "pong": True,
+                    "timestamp": time.time(),
+                })
             if command == "authenticate":
                 return await self._handle_authenticate(session, request_id, arguments)
             if command == "get_device_info":
@@ -88,10 +109,17 @@ class DCPHandler:
                 return self._simple_response(request_id, {"subscribed": sorted(session.subscribed_events)})
             if command == "request_control":
                 granted = self._sessions.request_control(session)
-                return self._simple_response(request_id, {"granted": granted})
+                role = "control" if granted else "read_only"
+                return self._simple_response(request_id, {
+                    "granted": granted,
+                    "session_role_granted": role,
+                })
             if command == "release_control":
                 self._sessions.release_control(session)
-                return self._simple_response(request_id, {"released": True})
+                return self._simple_response(request_id, {
+                    "released": True,
+                    "session_role_granted": "read_only",
+                })
             if command == "execute_tool":
                 return await self._handle_execute_tool(session, request_id, arguments)
             if command == "cancel_task":
@@ -115,6 +143,7 @@ class DCPHandler:
                     session, request_id, {"tool": command, "parameters": arguments}
                 )
 
+            logger.warning("Session %s unknown command: '%s'", session.session_id, command)
             return self._error(request_id, "INVALID_COMMAND", f"Unknown command '{command}'.")
 
         except DCPError as exc:
@@ -124,6 +153,47 @@ class DCPHandler:
             return self._error(request_id, "INTERNAL_ERROR", str(exc))
 
     # -- individual command handlers ---------------------------------
+
+    async def _handle_request_pairing(self, session: Session, request_id, arguments: dict) -> Dict[str, Any]:
+        """Handles client pairing over DCP (android_app_funtionality_implementation.txt sections 8-10).
+        Supports Wi-Fi, Bluetooth, and QR-based pairing verification."""
+        client_id = arguments.get("client_id")
+        client_name = arguments.get("client_name", "Unknown Client")
+        method = arguments.get("method", "wifi")
+        pairing_code = arguments.get("pairing_code")
+
+        if not client_id:
+            return self._error(request_id, "MISSING_ARGUMENT", "client_id is required.")
+
+        if self._pairing is None:
+            return self._error(request_id, "UNAVAILABLE", "Pairing manager not configured on this server.")
+
+        # QR pairing with pre-generated one-time code
+        if method == "qr" and pairing_code:
+            result = await self._pairing.verify_qr_pairing(
+                client_id=client_id,
+                client_name=client_name,
+                pairing_code=pairing_code,
+            )
+        else:
+            result = await self._pairing.request_pairing(
+                client_id=client_id,
+                client_name=client_name,
+                method=method,
+            )
+
+        if result.get("approved"):
+            return self._simple_response(request_id, {
+                "approved": True,
+                "secret": result["secret"],
+                "device_id": self._identity.device_id,
+            })
+        else:
+            return self._error(
+                request_id,
+                "PAIRING_DENIED",
+                result.get("reason", "Pairing request was denied or expired."),
+            )
 
     async def _handle_authenticate(self, session: Session, request_id, arguments) -> Dict[str, Any]:
         """Two-step nonce challenge-response (auth.py):

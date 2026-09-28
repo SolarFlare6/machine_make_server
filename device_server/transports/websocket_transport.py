@@ -65,8 +65,10 @@ class WiFiDCPServer:
                 response = await self._handler.handle(session, message)
                 if response is not None:
                     await send_fn(response)
-        except websockets.exceptions.ConnectionClosed:
-            pass
+        except websockets.exceptions.ConnectionClosed as exc:
+            logger.debug("session %s connection closed: code=%s, reason=%s", session.session_id, exc.code, exc.reason)
+        except Exception as exc:
+            logger.warning("session %s unexpected error: %s", session.session_id, exc)
         finally:
             logger.info("client disconnected: session %s", session.session_id)
             self._sessions.remove_session(session)

@@ -61,10 +61,12 @@ class CapabilityMapper:
 
         # Higher-level capabilities: require a robot controller (or
         # equivalent software module) AND the low-level building blocks.
-        if self._robot_controller is not None and "servo" in capabilities:
-            capabilities += ["stand", "sit", "walk", "turn", "movement"]
-            if has_imu:
-                capabilities.append("balance_correction")
+        if self._robot_controller is not None:
+            capabilities += ["battery", "telemetry", "emergency_stop", "config", "camera", "taking_pictures"]
+            if "servo" in capabilities:
+                capabilities += ["stand", "sit", "walk", "turn", "movement", "kinematics", "gait_control"]
+                if has_imu:
+                    capabilities.append("balance_correction")
 
         if has_camera:
             capabilities.append("taking_pictures")

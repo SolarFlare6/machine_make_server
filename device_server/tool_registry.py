@@ -117,7 +117,7 @@ class ToolRegistry:
                 },
             ))
 
-        if "imu" in capabilities:
+        if "imu" in capabilities or robot_controller is not None:
             self.register(ToolDefinition(
                 name="get_orientation",
                 description="Read the current IMU orientation.",
@@ -126,7 +126,7 @@ class ToolRegistry:
                 handler=lambda **kw: robot_controller.get_orientation(),
             ))
 
-        if "led" in capabilities:
+        if "led" in capabilities or robot_controller is not None:
             self.register(ToolDefinition(
                 name="set_led",
                 description="Turn the status LED on or off.",
@@ -135,11 +135,89 @@ class ToolRegistry:
                 handler=lambda **kw: robot_controller.set_led(**kw),
             ))
 
-        if "taking_pictures" in capabilities:
+        if robot_controller is not None:
+            # 1. emergency_stop tool
+            self.register(ToolDefinition(
+                name="emergency_stop",
+                description="Immediately halt all motors and stop the robot.",
+                arguments={},
+                permission="CONTROL",
+                handler=lambda **kw: robot_controller.emergency_stop(),
+            ))
+
+            # 2. set_gait tool
+            self.register(ToolDefinition(
+                name="set_gait",
+                description="Set locomotion gait mode (walk, trot, bound, gallop).",
+                arguments={"mode": {"type": "string"}},
+                permission="CONTROL",
+                handler=lambda mode="walk", **kw: robot_controller.set_gait(mode=mode),
+            ))
+
+            # 3. set_pose tool
+            self.register(ToolDefinition(
+                name="set_pose",
+                description="Set body kinematic orientation (pitch, roll, yaw) and height.",
+                arguments={
+                    "pitch": {"type": "number", "required": False},
+                    "roll": {"type": "number", "required": False},
+                    "yaw": {"type": "number", "required": False},
+                    "height": {"type": "number", "required": False},
+                },
+                permission="CONTROL",
+                handler=lambda **kw: robot_controller.set_pose(**kw),
+            ))
+
+            # 4. camera tools (start_camera, stop_camera, camera_snapshot, take_picture)
+            self.register(ToolDefinition(
+                name="start_camera",
+                description="Start camera video streaming.",
+                arguments={
+                    "resolution": {"type": "string", "required": False},
+                    "fps": {"type": "number", "required": False},
+                },
+                permission="CONTROL",
+                handler=lambda **kw: robot_controller.start_camera(**kw),
+            ))
+            self.register(ToolDefinition(
+                name="stop_camera",
+                description="Stop camera video streaming.",
+                arguments={},
+                permission="CONTROL",
+                handler=lambda **kw: robot_controller.stop_camera(),
+            ))
+            self.register(ToolDefinition(
+                name="camera_snapshot",
+                description="Capture a still snapshot from the camera (alias for take_picture).",
+                arguments={},
+                permission="READ_ONLY",
+                handler=lambda **kw: robot_controller.camera_snapshot(),
+            ))
             self.register(ToolDefinition(
                 name="take_picture",
                 description="Capture a still image from the camera.",
                 arguments={},
                 permission="READ_ONLY",
                 handler=lambda **kw: robot_controller.take_picture(),
+            ))
+
+            # 5. battery tool
+            self.register(ToolDefinition(
+                name="get_battery",
+                description="Get device battery level and charging status.",
+                arguments={},
+                permission="READ_ONLY",
+                handler=lambda **kw: robot_controller.get_battery(),
+            ))
+
+            # 6. dynamic config tool
+            self.register(ToolDefinition(
+                name="set_config",
+                description="Set dynamic robot runtime parameter.",
+                arguments={
+                    "param": {"type": "string"},
+                    "value": {"type": "any", "required": False},
+                },
+                permission="CONTROL",
+                handler=lambda param="", value=None, **kw: robot_controller.set_config(param, value),
             ))

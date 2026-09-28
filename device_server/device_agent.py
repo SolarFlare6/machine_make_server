@@ -72,7 +72,11 @@ class DeviceAgent:
 
         # 5. Execution
         if tool.is_long_running:
-            task_id = self._tasks.start(lambda progress_cb: tool.handler(progress_cb=progress_cb, **parameters))
+            task_id = self._tasks.start(
+                lambda progress_cb: tool.handler(progress_cb=progress_cb, **parameters),
+                tool_name=tool_name,
+                parameters=parameters,
+            )
             return {"task_id": task_id}
 
         try:
@@ -94,11 +98,15 @@ class DeviceAgent:
 
         for arg_name, schema in tool.arguments.items():
             if arg_name not in parameters:
-                raise DCPError("MISSING_ARGUMENT", f"Missing required argument '{arg_name}'.")
-            expected_type = _TYPE_MAP.get(schema.get("type"))
-            if expected_type and not isinstance(parameters[arg_name], expected_type):
-                raise DCPError("INVALID_ARGUMENT",
-                                f"Argument '{arg_name}' must be of type {schema.get('type')}.")
+                if schema.get("required", True):
+                    raise DCPError("MISSING_ARGUMENT", f"Missing required argument '{arg_name}'.")
+                continue
+            schema_type = schema.get("type")
+            if schema_type and schema_type != "any":
+                expected_type = _TYPE_MAP.get(schema_type)
+                if expected_type and not isinstance(parameters[arg_name], expected_type):
+                    raise DCPError("INVALID_ARGUMENT",
+                                    f"Argument '{arg_name}' must be of type {schema_type}.")
 
         unknown = set(parameters) - set(tool.arguments)
         if unknown:

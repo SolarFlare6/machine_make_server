@@ -27,7 +27,11 @@ class RobotController:
         self._pca9685_cfg = physical_config.get("pca9685", {})
         self.standing = False
         self.orientation = {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}
+        self.height = 0.0
         self.led_state = False
+        self.gait = "walk"
+        self.camera_streaming = False
+        self.dynamic_config: Dict[str, Any] = {}
 
     # -- simulated low-level hardware I/O --------------------------------
 
@@ -41,6 +45,54 @@ class RobotController:
     # Each of these is what tool_registry.py wires a DCP tool call to.
     # progress_cb(fraction: float) is called for tools that report
     # task_progress events; it may be None for instantaneous operations.
+
+    async def emergency_stop(self) -> Dict[str, Any]:
+        """Immediately halts all motion, disables servo drive, and sits down."""
+        self.standing = False
+        await self._drive_servos({name: 0 for name in self._servos}, duration_s=0.05)
+        return {"stopped": True, "standing": False, "message": "Emergency stop triggered"}
+
+    async def set_gait(self, mode: str = "walk") -> Dict[str, Any]:
+        """Sets the walking gait mode (walk, trot, bound, gallop)."""
+        valid_modes = ["walk", "trot", "bound", "gallop"]
+        selected = str(mode).lower() if str(mode).lower() in valid_modes else "walk"
+        self.gait = selected
+        return {"gait": selected, "supported_gaits": valid_modes}
+
+    async def set_pose(self, pitch: float = 0.0, roll: float = 0.0,
+                       yaw: float = 0.0, height: float = 0.0) -> Dict[str, Any]:
+        """Sets body orientation (kinematic pose) and body height."""
+        self.orientation = {"roll": float(roll), "pitch": float(pitch), "yaw": float(yaw)}
+        self.height = float(height)
+        return {"orientation": dict(self.orientation), "height": self.height}
+
+    async def start_camera(self, resolution: str = "640x480", fps: int = 30) -> Dict[str, Any]:
+        """Starts camera stream endpoint."""
+        self.camera_streaming = True
+        return {"streaming": True, "resolution": resolution, "fps": fps, "stream_path": "/camera/stream"}
+
+    async def stop_camera(self) -> Dict[str, Any]:
+        """Stops camera stream endpoint."""
+        self.camera_streaming = False
+        return {"streaming": False}
+
+    async def camera_snapshot(self) -> Dict[str, Any]:
+        """Alias for take_picture used by the mobile app."""
+        return await self.take_picture()
+
+    async def get_battery(self) -> Dict[str, Any]:
+        """Returns battery telemetry."""
+        return {
+            "percentage": 88,
+            "voltage": 8.1,
+            "charging": False,
+            "level": 88,
+        }
+
+    async def set_config(self, param: str, value: Any = None) -> Dict[str, Any]:
+        """Updates a dynamic runtime parameter."""
+        self.dynamic_config[param] = value
+        return {"updated": True, "param": param, "value": value}
 
     async def stand(self, progress_cb: Optional[Callable[[float], None]] = None) -> None:
         await self._drive_servos({name: 90 for name in self._servos}, duration_s=1.0)

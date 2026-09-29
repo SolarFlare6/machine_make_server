@@ -94,7 +94,17 @@ class DeviceAgent:
                             f"Tool '{tool.name}' requires {tool.permission} permission.")
 
     def _validate_arguments(self, tool: ToolDefinition, parameters: Dict[str, Any]) -> None:
-        _TYPE_MAP = {"string": str, "number": (int, float), "boolean": bool}
+        _TYPE_MAP = {
+            "string": str,
+            "str": str,
+            "number": (int, float),
+            "int": int,
+            "float": (int, float),
+            "boolean": bool,
+            "bool": bool,
+            "list": (list, tuple),
+            "array": (list, tuple),
+        }
 
         for arg_name, schema in tool.arguments.items():
             if arg_name not in parameters:

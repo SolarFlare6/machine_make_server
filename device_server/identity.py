@@ -23,12 +23,13 @@ _IDENTITY_FILE_DEFAULT = os.path.join(os.path.dirname(__file__), "config", "devi
 
 class DeviceIdentity:
     def __init__(self, name: str, profile: str, device_type: str = "robot",
-                 identity_file: str = _IDENTITY_FILE_DEFAULT):
+                 identity_file: str = _IDENTITY_FILE_DEFAULT,
+                 device_id: str = None):
         self._identity_file = identity_file
         self.name = name
         self.profile = profile
         self.device_type = device_type
-        self.device_id: str = None
+        self.device_id: str = device_id
         self.server_key: str = None  # hex-encoded long-term secret
         self._load_or_create()
 
@@ -36,10 +37,16 @@ class DeviceIdentity:
         if os.path.isfile(self._identity_file):
             with open(self._identity_file, "r") as f:
                 data = json.load(f)
-            self.device_id = data["device_id"]
-            self.server_key = data["server_key"]
+            stored_id = data.get("device_id")
+            self.server_key = data.get("server_key") or secrets.token_hex(32)
+            if self.device_id and self.device_id != stored_id:
+                # Custom device_id provided, persist update
+                self._persist()
+            else:
+                self.device_id = stored_id
         else:
-            self.device_id = self._generate_device_id()
+            if not self.device_id:
+                self.device_id = self._generate_device_id()
             self.server_key = secrets.token_hex(32)
             self._persist()
 
@@ -55,12 +62,21 @@ class DeviceIdentity:
 
     def device_info(self) -> Dict[str, Any]:
         """Matches the get_device_info response payload in
-        dcp_protocol_specification.txt, section 12."""
+        dcp_protocol_specification.txt, section 12 and Needle AI metadata."""
         return {
             "device_id": self.device_id,
             "name": self.name,
             "type": self.device_type,
             "profile": self.profile,
+            "firmware_version": "2.1.0",
+            "supported_versions": ["1.0", "1.1"],
+            "ai": {
+                "needle": {
+                    "supported": True,
+                    "execution": ["device", "client"],
+                    "preferred": "device",
+                }
+            },
         }
 
     def advertisement_info(self) -> Dict[str, Any]:

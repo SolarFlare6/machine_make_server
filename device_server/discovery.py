@@ -46,12 +46,15 @@ class DiscoveryAdvertiser:
             return
 
         properties = {
-            "device_id": self._device_id,
-            "profile": self._profile,
-            "protocol": "DCP",
-            "protocol_version": "1.0",
-            **{k: str(v) for k, v in self._extra_info.items()},
+            b"device_id": self._device_id.encode("utf-8"),
+            b"profile": self._profile.encode("utf-8"),
+            b"protocol": b"DCP",
+            b"protocol_version": b"1.0",
         }
+        for k, v in self._extra_info.items():
+            k_bytes = k.encode("utf-8") if isinstance(k, str) else bytes(k)
+            v_bytes = str(v).encode("utf-8") if not isinstance(v, bytes) else v
+            properties[k_bytes] = v_bytes
 
         local_ip = self._local_ip()
 

@@ -1,33 +1,12 @@
-"""
-main.py
-
-Device Server entry point. Implements the startup sequence exactly as
-listed in device_server_hardware_mapper.txt section 4:
-
-    1. Start Device Server.
-    2. Load device identity.
-    3. Initialize security keys.
-    4. Run Hardware Mapper.
-    5. Scan available hardware.
-    6. Load physical configuration.
-    7. Build Capability Map.
-    8. Build Tool Registry.
-    9. Start Wi-Fi DCP server.
-    10. Start Bluetooth DCP server.        (not implemented -- see README.md)
-    11. Start discovery/advertising.
-    12. Start optional Needle.             (out of scope for this file)
-    13. Wait for clients.
-
-Run with:  python main.py
-Stop with: Ctrl+C
-"""
-
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
+from typing import Optional
 
+from auto_config import run_setup_wizard
 from auth import Authenticator, TrustStore
 from capability_mapper import CapabilityMapper
 from config import ConfigurationManager
@@ -51,6 +30,13 @@ logger = logging.getLogger("main")
 
 WIFI_PORT = 8765
 
+# setup vars
+automatic_detection = True  # Set to True to run the new hardware auto-detection implementation; False runs the old implementation
+is_robot_project = False     # Set to True to configure the server for your Quadruped Robot project
+
+# Uppercase aliases for convenience:
+AUTOMATIC_DETECTION = automatic_detection
+IS_ROBOT_PROJECT = is_robot_project
 
 async def console_loop(
     pairing_manager: PairingManager,
@@ -135,7 +121,8 @@ async def telemetry_loop(
     event_manager: EventManager,
     session_manager: SessionManager,
     stop_event: asyncio.Event,
-    interval_s: float = 2.5,
+    interval_s: float = 2.0,
+    robot_controller: Optional[RobotController] = None,
 ) -> None:
     """Periodically emits telemetry events to connected sessions subscribed to 'telemetry'."""
     while not stop_event.is_set():
@@ -144,8 +131,11 @@ async def telemetry_loop(
             if not session_manager.sessions_subscribed_to("telemetry"):
                 continue
 
-            cpu_val = 15.0
-            ram_val = 35.0
+            cpu_val = 0.0
+            ram_val = 0.0
+            temp_val = 45.0
+            gpu_val = 0.0
+
             try:
                 import psutil
                 cpu_val = float(psutil.cpu_percent(interval=None))
@@ -153,12 +143,30 @@ async def telemetry_loop(
             except Exception:
                 pass
 
+            # Read Raspberry Pi CPU temperature if available
+            try:
+                with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+                    temp_val = float(f.read().strip()) / 1000.0
+            except Exception:
+                pass
+
+            imu_data = robot_controller.get_mpu6050_telemetry() if robot_controller else {
+                "pitch": 0.42,
+                "roll": -1.15,
+                "yaw": 0.0,
+                "accel": {"x": 0.01, "y": -0.04, "z": 0.99},
+                "gyro": {"x": 0.2, "y": -0.5, "z": 0.1},
+            }
+
             telemetry_data = {
-                "cpu": cpu_val,
-                "ram": ram_val,
-                "gpu": 0.0,
-                "temp": 42.5,
-                "battery": 88.0,
+                "cpu": round(cpu_val, 1),
+                "ram": round(ram_val, 1),
+                "temp": round(temp_val, 1),
+                "gpu": round(gpu_val, 1),
+                "power_source": "dc_in",
+                "battery": None,
+                "voltage": None,
+                "imu": imu_data,
             }
             await event_manager.emit("telemetry", telemetry_data)
         except asyncio.CancelledError:
@@ -173,37 +181,86 @@ async def run(
     port: int = WIFI_PORT,
     pairing_manager: PairingManager = None,
     trust_store: TrustStore = None,
+    device_id: Optional[str] = None,
+    device_name: Optional[str] = None,
+    setup_mode: bool = False,
+    auto_detect: Optional[bool] = None,
+    robot_project: Optional[bool] = None,
 ) -> None:
-    # 2-3. Device identity + security keys
-    config = ConfigurationManager()
-    identity_cfg = config.identity
-    identity = DeviceIdentity(
-        name=identity_cfg.get("name", "Unnamed Device"),
-        profile=identity_cfg.get("profile", "generic"),
-        device_type=identity_cfg.get("type", "device"),
-    )
-    logger.info("device identity: %s (%s)", identity.device_id, identity.profile)
+    # Resolve operating mode: explicit argument overrides top-level variable
+    should_be_robot = is_robot_project if robot_project is None else robot_project
+    should_auto_detect = automatic_detection if auto_detect is None else auto_detect
 
-    # 4-5. Hardware Mapper: scan available hardware
+    # 1. Hardware Mapper: scan available hardware
     hardware_mapper = HardwareMapper()
     hardware_map = hardware_mapper.scan()
     logger.info("hardware scan complete; interfaces=%s", hardware_map["interfaces"])
     if hardware_map["detector_errors"]:
         logger.warning("some detectors were unavailable: %s", hardware_map["detector_errors"])
 
-    # 6. Physical configuration already loaded via ConfigurationManager above.
-    physical_config = config.physical_configuration
+    config = ConfigurationManager()
+
+    # 2. Operating Mode Routing:
+    if should_be_robot:
+        # User's Robot Quadruped Project Mode:
+        logger.info("Mode: is_robot_project=True -> setting up server specifically for Quadruped Robot")
+        identity_cfg = config.identity
+        quad_name = device_name or identity_cfg.get("name") or "MachineMake Quadruped Dog"
+        identity = DeviceIdentity(
+            name=quad_name,
+            profile="quadruped",
+            device_type="robot",
+            device_id=device_id or identity_cfg.get("device_id"),
+        )
+        physical_config = dict(config.physical_configuration)
+        # Ensure quadruped leg servos and IMU are mapped
+        if "servos" not in physical_config:
+            from auto_config import PROFILES
+            physical_config.update(PROFILES["quadruped"]["configuration"])
+
+    elif should_auto_detect or setup_mode or not os.path.isfile(config._config_file):
+        # New implementation: Hardware-scan auto-detection / Setup wizard
+        is_interactive = setup_mode or (not should_auto_detect and sys.stdin.isatty())
+        logger.info("Mode: automatic_detection=True -> running new hardware auto-detection (interactive=%s)", is_interactive)
+        run_setup_wizard(hardware_map, interactive=is_interactive, save_path=config._config_file)
+        config.reload()
+
+        identity_cfg = config.identity
+        identity = DeviceIdentity(
+            name=device_name or identity_cfg.get("name", "Unnamed Device"),
+            profile=identity_cfg.get("profile", "generic"),
+            device_type=identity_cfg.get("type", "device"),
+            device_id=device_id or identity_cfg.get("device_id"),
+        )
+        physical_config = config.physical_configuration
+
+    else:
+        # Old implementation: Load static device_config.json directly without auto-detection
+        logger.info("Mode: automatic_detection=False -> running standard/old implementation from device_config.json")
+        identity_cfg = config.identity
+        identity = DeviceIdentity(
+            name=device_name or identity_cfg.get("name", "Unnamed Device"),
+            profile=identity_cfg.get("profile", "generic"),
+            device_type=identity_cfg.get("type", "device"),
+            device_id=device_id or identity_cfg.get("device_id"),
+        )
+        physical_config = config.physical_configuration
+
+    logger.info("device identity: %s (profile=%s, type=%s, name='%s')", identity.device_id, identity.profile, identity.device_type, identity.name)
+
+    # 4. Physical configuration
+    physical_config = physical_config or {}
 
     # Robot Controller: the "software module" the Capability Mapper needs
     # to unlock movement capabilities (device_server_hardware_mapper.txt section 23).
-    robot_controller = RobotController(physical_config)
+    robot_controller = RobotController(physical_config, hardware_map=hardware_map)
 
-    # 7. Capability Map
+    # 5. Capability Map
     capability_mapper = CapabilityMapper(robot_controller=robot_controller)
     capabilities = capability_mapper.build(hardware_map, physical_config)
     logger.info("capabilities: %s", capabilities)
 
-    # 8. Tool Registry
+    # 6. Tool Registry
     tool_registry = ToolRegistry()
     tool_registry.build_default_tools(capabilities, robot_controller, config.safety_limits)
     logger.info("registered tools: %s", list(tool_registry.all_tools().keys()))
@@ -276,7 +333,7 @@ async def run(
 
     # Start periodic telemetry emitter
     telemetry_task = asyncio.create_task(
-        telemetry_loop(event_manager, session_manager, stop_event)
+        telemetry_loop(event_manager, session_manager, stop_event, robot_controller=robot_controller)
     )
 
     await stop_event.wait()
@@ -294,10 +351,25 @@ def main():
     parser.add_argument("--qr", action="store_true", help="Generate and display a pairing QR code on startup")
     parser.add_argument("--qr-name", default="Mobile App", help="Client name for QR pairing invitation")
     parser.add_argument("--port", type=int, default=WIFI_PORT, help="Wi-Fi WebSocket port (default: 8765)")
+    parser.add_argument("--device-id", default=None, help="Explicit device ID (e.g. quadruped-pi-01)")
+    parser.add_argument("--name", default=None, help="Device display name (e.g. MachineMake Quadruped Dog)")
+    parser.add_argument("--setup", action="store_true", help="Run interactive initial setup wizard to detect & configure device")
+    parser.add_argument("--auto-detect", action="store_true", default=None, help="Automatically infer and save device configuration from hardware scan")
+    parser.add_argument("--robot", action="store_true", default=None, help="Force server setup for quadruped robot project")
+    parser.add_argument("--no-robot", action="store_false", dest="robot", help="Disable forced robot quadruped setup")
     args = parser.parse_args()
 
     try:
-        asyncio.run(run(auto_qr=args.qr, qr_name=args.qr_name, port=args.port))
+        asyncio.run(run(
+            auto_qr=args.qr,
+            qr_name=args.qr_name,
+            port=args.port,
+            device_id=args.device_id,
+            device_name=args.name,
+            setup_mode=args.setup,
+            auto_detect=args.auto_detect,
+            robot_project=args.robot,
+        ))
     except (KeyboardInterrupt, SystemExit):
         pass
 

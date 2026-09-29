@@ -3,12 +3,16 @@ event_manager.py
 
 Event Manager (device_server_hardware_mapper.txt section 23-ish via the
 Flutter doc's equivalent; dcp_protocol_specification.txt sections 9-10,
-19-20). Broadcasts asynchronous DCP events to every session subscribed to
-that event name, in the exact envelope shape the protocol defines.
+19-20; MachineMake Server Implementation Specification DCP v1.0, section 4).
+
+Broadcasts asynchronous DCP events to every session subscribed to
+that event name, in the exact envelope shapes the protocol defines.
 """
 
 import logging
+import time
 from typing import Any, Dict, Optional
+import uuid
 
 from session import SessionManager
 
@@ -32,7 +36,10 @@ class EventManager:
             payload_data.setdefault("task_id", task_id)
 
         device_id = self._identity.device_id if self._identity else ""
+        msg_id = str(uuid.uuid4())
+        now_ms = int(time.time() * 1000)
 
+        # Dual envelope: fields for standard DCP + Section 4 mobile app schema
         message: Dict[str, Any] = {
             "dcp": DCP_VERSION,
             "type": "event",
@@ -40,11 +47,19 @@ class EventManager:
             "event_type": event_name,
             "device_id": device_id,
             "data": payload_data,
+            # MachineMake App Section 4 schema fields:
+            "msgId": msg_id,
+            "payload": {
+                "eventType": event_name,
+                "deviceId": device_id,
+                "data": payload_data,
+            },
+            "timestampMs": now_ms,
         }
         if task_id is not None:
             message["task_id"] = task_id
 
-        target_sessions: Dict[int, Session] = {}
+        target_sessions: Dict[int, Any] = {}
         for s in self._sessions.sessions_subscribed_to(event_name):
             target_sessions[s.session_id] = s
         if event_name in ("task_update", "task_progress", "task_started", "task_completed", "task_failed"):

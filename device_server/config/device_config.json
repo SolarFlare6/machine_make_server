@@ -1,39 +1,14 @@
 {
   "identity": {
-    "name": "My Quadruped",
-    "profile": "quadruped",
-    "type": "robot"
+    "name": "DESKTOP-2EF22FF Laptop",
+    "profile": "laptop",
+    "type": "computer"
   },
-
   "configuration": {
-    "pca9685": {
-      "bus": 1,
-      "address": "0x40"
-    },
-    "servos": {
-      "front_left_shoulder": {"controller": "pca9685", "channel": 0},
-      "front_left_upper":    {"controller": "pca9685", "channel": 1},
-      "front_right_shoulder":{"controller": "pca9685", "channel": 2},
-      "front_right_upper":   {"controller": "pca9685", "channel": 3},
-      "rear_left_shoulder":  {"controller": "pca9685", "channel": 4},
-      "rear_left_upper":     {"controller": "pca9685", "channel": 5},
-      "rear_right_shoulder": {"controller": "pca9685", "channel": 6},
-      "rear_right_upper":    {"controller": "pca9685", "channel": 7}
-    },
-    "imu": {
-      "bus": 1,
-      "address": "0x68"
-    },
-    "led": {
-      "gpio_pin": 27
-    }
+    "display": true,
+    "portable": true
   },
-
-  "safety_limits": {
-    "max_walk_distance_m": 5.0,
-    "max_turn_angle_deg": 180.0
-  },
-
+  "safety_limits": {},
   "connection_loss_policy": {
     "interactive_control": "safe_stop",
     "autonomous_tasks": "continue"

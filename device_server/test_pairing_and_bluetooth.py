@@ -19,6 +19,7 @@ import unittest
 from auth import Authenticator, TrustStore
 from config import ConfigurationManager
 from dcp_handler import DCPHandler
+from discovery import DiscoveryAdvertiser
 from hardware_mapper.mapper import HardwareMapper
 from identity import DeviceIdentity
 from pairing import PairingManager
@@ -465,6 +466,499 @@ class TestPairingAndBluetooth(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ram", data)
         self.assertIn("temp", data)
         self.assertIn("battery", data)
+        self.assertIn(data.get("power_source"), ("dc_in", "dc_external"))
+        self.assertIn("imu", data)
+
+    def test_gpio_and_pwm_capabilities_in_manifest(self):
+        """Tests that CapabilityMapper provides rich GPIO and PWM descriptors without battery."""
+        from capability_mapper import CapabilityMapper
+        mapper = CapabilityMapper(self.robot_controller)
+        caps = mapper.build({"interfaces": {"gpio": True}}, {})
+        gpio_cap = next((c for c in caps if isinstance(c, dict) and c.get("id") == "gpio"), None)
+        self.assertIsNotNone(gpio_cap)
+        self.assertIn("pins", gpio_cap["params"])
+        self.assertIn(17, gpio_cap["params"]["pins"])
+
+        pwm_cap = next((c for c in caps if isinstance(c, dict) and c.get("id") == "pwm"), None)
+        self.assertIsNotNone(pwm_cap)
+        self.assertEqual(pwm_cap["params"]["channels"], 16)
+
+        # Battery must NOT be present
+        battery_cap = next((c for c in caps if (c == "battery" or (isinstance(c, dict) and c.get("id") == "battery"))), None)
+        self.assertIsNone(battery_cap)
+
+    async def test_ai_needle_metadata_in_device_info(self):
+        """Tests that get_device_info advertises firmware_version and ai.needle metadata."""
+        session = self.session_manager.create_session(lambda m: None)
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 50,
+            "command": "get_device_info", "arguments": {},
+        })
+        self.assertTrue(resp["success"])
+        info = resp["data"]
+        self.assertEqual(info.get("firmware_version"), "2.1.0")
+        self.assertIn("1.0", info.get("supported_versions", []))
+        self.assertIn("ai", info)
+        needle = info["ai"].get("needle", {})
+        self.assertTrue(needle.get("supported"))
+        self.assertIn("device", needle.get("execution", []))
+        self.assertEqual(needle.get("preferred"), "device")
+
+    async def test_needle_prompt_execution(self):
+        """Tests that needle_prompt interprets natural language instructions into actions."""
+        session = self.session_manager.create_session(lambda m: None)
+        session.authenticated = True
+        session.permission = "CONTROL"
+        self.session_manager.request_control(session)
+
+        # Stand command
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 51,
+            "command": "execute_tool",
+            "arguments": {"tool": "needle_prompt", "parameters": {"prompt": "robot please stand up"}},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["action"], "stand")
+        self.assertTrue(self.robot_controller.standing)
+
+        # Sit command
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 52,
+            "command": "execute_tool",
+            "arguments": {"tool": "needle_prompt", "parameters": {"prompt": "sit down now"}},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["action"], "sit")
+        self.assertFalse(self.robot_controller.standing)
+
+        # Light command
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 53,
+            "command": "execute_tool",
+            "arguments": {"tool": "needle_prompt", "parameters": {"prompt": "turn on flashlight"}},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["action"], "set_led")
+        self.assertTrue(self.robot_controller.led_state)
+
+        # Stop command
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 54,
+            "command": "execute_tool",
+            "arguments": {"tool": "needle_prompt", "parameters": {"prompt": "emergency stop halt"}},
+        })
+        self.assertTrue(resp["success"])
+        self.assertTrue(resp["data"]["result"]["stopped"])
+
+        # Hardware inquiry command
+        self.robot_controller.set_hardware_map({
+            "device": {"platform": "raspberry_pi", "os": "linux", "architecture": "aarch64"},
+            "system": {"cpu": {"cores": 4}},
+            "interfaces": {"gpio": True, "i2c": True, "wifi": True},
+        })
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 55,
+            "command": "execute_tool",
+            "arguments": {"tool": "needle_prompt", "parameters": {"prompt": "what hardware do you have?"}},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["action"], "hardware_info")
+        self.assertIn("raspberry_pi", resp["data"]["result"]["message"])
+
+    async def test_generic_hardware_gpio_and_pwm(self):
+        """Tests gpio_write, gpio_read, and pwm_set tools."""
+        session = self.session_manager.create_session(lambda m: None)
+        session.authenticated = True
+        session.permission = "CONTROL"
+        self.session_manager.request_control(session)
+
+        # Write GPIO 17 HIGH
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 60,
+            "command": "execute_tool",
+            "arguments": {"tool": "gpio_write", "parameters": {"pin": 17, "state": True}},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["pin"], 17)
+        self.assertTrue(resp["data"]["result"]["state"])
+
+        # Read GPIO 17
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 61,
+            "command": "execute_tool",
+            "arguments": {"tool": "gpio_read", "parameters": {"pin": 17}},
+        })
+        self.assertTrue(resp["success"])
+        self.assertTrue(resp["data"]["result"]["state"])
+
+        # Write GPIO 17 LOW
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 62,
+            "command": "execute_tool",
+            "arguments": {"tool": "gpio_write", "parameters": {"pin": 17, "state": False}},
+        })
+        self.assertTrue(resp["success"])
+        self.assertFalse(resp["data"]["result"]["state"])
+
+        # Set PWM channel 2
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 63,
+            "command": "execute_tool",
+            "arguments": {"tool": "pwm_set", "parameters": {"channel": 2, "value": 0.65}},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["channel"], 2)
+        self.assertAlmostEqual(resp["data"]["result"]["value"], 0.65)
+
+    def test_mdns_discovery_byte_properties(self):
+        """Tests that DiscoveryAdvertiser encodes properties as bytes for zeroconf compatibility."""
+        advertiser = DiscoveryAdvertiser(
+            device_id="quadruped-test",
+            profile="quadruped",
+            port=8765,
+            extra_info={"name": "TestBot", "version": "1.0"},
+        )
+        # Check that start() doesn't throw and properties encoding handles bytes cleanly
+        advertiser.start()
+        if advertiser._service_info is not None:
+            props = advertiser._service_info.properties
+            for k, v in props.items():
+                self.assertIsInstance(k, bytes)
+                self.assertIsInstance(v, bytes)
+        advertiser.stop()
+
+    def test_section2_capabilities_registration(self):
+        """Tests that CapabilityMapper advertises the 5 core capabilities from Section 2."""
+        from capability_mapper import CapabilityMapper
+        mapper = CapabilityMapper(self.robot_controller)
+        hw_map = {"interfaces": {"gpio": True, "i2c": True}, "devices": {}, "system": {}}
+        caps = mapper.build(hw_map, {})
+        cap_ids = {c["id"] if isinstance(c, dict) else c for c in caps}
+
+        self.assertIn("robotics", cap_ids)
+        self.assertIn("imu", cap_ids)
+        self.assertIn("lighting", cap_ids)
+        self.assertIn("buzzer", cap_ids)
+        self.assertIn("camera", cap_ids)
+
+    async def test_pca9685_servo_tools(self):
+        """Tests Section 3.2 direct PCA9685 servo control tools."""
+        session = self.session_manager.create_session(lambda msg: None)
+        session.authenticated = True
+        session.permission = "CONTROL"
+
+        # 1. driver_set_servo_angle_with_index
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 101,
+            "command": "driver_set_servo_angle_with_index",
+            "arguments": {"index": 3, "angle": 90},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["index"], 3)
+        self.assertEqual(resp["data"]["result"]["angle"], 90)
+
+        # 2. snap_servo_left
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 102,
+            "command": "snap_servo_left",
+            "arguments": {"index": 4},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["angle"], 180.0)
+
+        # 3. snap_servo_right
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 103,
+            "command": "snap_servo_right",
+            "arguments": {"index": 4},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["angle"], 0.0)
+
+        # 4. pan_to_left
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 104,
+            "command": "pan_to_left",
+            "arguments": {"index": 6},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["angle"], 180.0)
+
+        # 5. pan_to_right
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 105,
+            "command": "pan_to_right",
+            "arguments": {"index": 6},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["angle"], 0.0)
+
+        # 6. cleanup_servos
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 106,
+            "command": "cleanup_servos",
+            "arguments": {},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["status"], "servos_released")
+
+    async def test_ws281x_led_strip_tools(self):
+        """Tests Section 3.3 WS281x 8-LED strip tools."""
+        session = self.session_manager.create_session(lambda msg: None)
+        session.authenticated = True
+        session.permission = "CONTROL"
+
+        # 1. turn_on_strip_with_color
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 201,
+            "command": "turn_on_strip_with_color",
+            "arguments": {"r": 0, "g": 255, "b": 128},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["color"], [0, 255, 128])
+
+        # 2. turn_off_strip
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 202,
+            "command": "turn_off_strip",
+            "arguments": {},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["status"], "off")
+
+        # 3. turn_on_led_at_index
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 203,
+            "command": "turn_on_led_at_index",
+            "arguments": {"index": 2, "r": 255, "g": 0, "b": 0},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["index"], 2)
+        self.assertEqual(resp["data"]["result"]["color"], [255, 0, 0])
+
+        # 4. turn_off_led_at_index
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 204,
+            "command": "turn_off_led_at_index",
+            "arguments": {"index": 2},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["status"], "off")
+
+        # 5. animations and alerts
+        for anim in ("animate_running_process", "flash_alert", "blink_oke", "blink_warning"):
+            resp = await self.dcp_handler.handle(session, {
+                "dcp": "1.0", "type": "request", "id": 205,
+                "command": anim,
+                "arguments": {},
+            })
+            self.assertTrue(resp["success"], f"{anim} failed")
+
+    async def test_buzzer_and_imu_and_power_tools(self):
+        """Tests Section 3.4 buzzer, 3.5 IMU, and 3.6 power tools."""
+        session = self.session_manager.create_session(lambda msg: None)
+        session.authenticated = True
+        session.permission = "CONTROL"
+
+        # Buzzer: play_tone
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 301,
+            "command": "play_tone",
+            "arguments": {"tone": "A4"},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["tone"], "A4")
+
+        # Buzzer: play_list_of_notes
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 302,
+            "command": "play_list_of_notes",
+            "arguments": {"notes": ["C4", "E4", "G4"]},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["notes"], ["C4", "E4", "G4"])
+
+        # IMU: get_sensor_accel
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 303,
+            "command": "get_sensor_accel",
+            "arguments": {},
+        })
+        self.assertTrue(resp["success"])
+        self.assertIn("z", resp["data"]["result"])
+
+        # IMU: get_sensor_gyro
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 304,
+            "command": "get_sensor_gyro",
+            "arguments": {},
+        })
+        self.assertTrue(resp["success"])
+        self.assertIn("x", resp["data"]["result"])
+
+        # IMU: get_pitch_roll
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 305,
+            "command": "get_pitch_roll",
+            "arguments": {},
+        })
+        self.assertTrue(resp["success"])
+        self.assertIn("pitch", resp["data"]["result"])
+        self.assertIn("roll", resp["data"]["result"])
+
+        # Power: shutdown & reboot
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 306,
+            "command": "shutdown",
+            "arguments": {},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["status"], "shutting_down")
+
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 307,
+            "command": "reboot",
+            "arguments": {},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["status"], "rebooting")
+
+    async def test_wire_format_b_handshake_and_execution(self):
+        """Tests Section 1.1 & Section 5 mobile app handshake and execute messages."""
+        session = self.session_manager.create_session(lambda msg: None)
+
+        # 1. hello -> hello_ack
+        resp = await self.dcp_handler.handle(session, {
+            "msgId": "req-1",
+            "type": "hello",
+            "payload": {
+                "clientId": "machmake-app-uuid",
+                "clientVersion": "2.0.0",
+                "protocolVersion": "1.0.0",
+            },
+            "timestampMs": 1727570000000,
+        })
+        self.assertEqual(resp["type"], "hello_ack")
+        self.assertEqual(resp["msgId"], "req-1")
+        self.assertIn("deviceId", resp["payload"])
+
+        # 2. negotiate -> negotiate_ack
+        resp = await self.dcp_handler.handle(session, {
+            "msgId": "req-2",
+            "type": "negotiate",
+            "payload": {"selectedVersion": "1.0.0"},
+            "timestampMs": 1727570000050,
+        })
+        self.assertEqual(resp["type"], "negotiate_ack")
+        self.assertEqual(resp["payload"]["selectedVersion"], "1.0.0")
+
+        # 3. auth -> auth_ack
+        resp = await self.dcp_handler.handle(session, {
+            "msgId": "req-3",
+            "type": "auth",
+            "payload": {"token": "sample-tok"},
+            "timestampMs": 1727570000100,
+        })
+        self.assertEqual(resp["type"], "auth_ack")
+        self.assertTrue(resp["payload"]["success"])
+        self.assertTrue(session.authenticated)
+
+        # 4. capabilities -> capabilities_response
+        resp = await self.dcp_handler.handle(session, {
+            "msgId": "req-4",
+            "type": "capabilities",
+            "payload": {},
+        })
+        self.assertEqual(resp["type"], "capabilities_response")
+        self.assertIn("capabilities", resp["payload"])
+
+        # 5. tools -> tools_response
+        resp = await self.dcp_handler.handle(session, {
+            "msgId": "req-5",
+            "type": "tools",
+            "payload": {},
+        })
+        self.assertEqual(resp["type"], "tools_response")
+        self.assertIn("tools", resp["payload"])
+
+        # 6. subscribe_events -> subscribe_ack
+        resp = await self.dcp_handler.handle(session, {
+            "msgId": "req-6",
+            "type": "subscribe_events",
+            "payload": {"events": ["telemetry"]},
+        })
+        self.assertEqual(resp["type"], "subscribe_ack")
+        self.assertIn("telemetry", resp["payload"]["subscribed"])
+
+        # 7. execute -> execute_response
+        resp = await self.dcp_handler.handle(session, {
+            "msgId": "req-7",
+            "type": "execute",
+            "payload": {
+                "toolName": "driver_set_servo_angle_with_index",
+                "params": {"index": 7, "angle": 45},
+            },
+            "timestampMs": 1727570000200,
+        })
+        self.assertEqual(resp["type"], "execute_response")
+        self.assertTrue(resp["payload"]["success"])
+        self.assertEqual(resp["payload"]["result"]["index"], 7)
+        self.assertEqual(resp["payload"]["result"]["angle"], 45)
+
+        # 8. ping -> pong
+        resp = await self.dcp_handler.handle(session, {
+            "msgId": "req-8",
+            "type": "ping",
+            "payload": {},
+        })
+        self.assertEqual(resp["type"], "pong")
+
+    def test_auto_config_heuristics(self):
+        """Tests auto-configuration inference from different hardware map profiles."""
+        import auto_config
+
+        # 1. Pi with PCA9685 and MPU6050 -> quadruped
+        map_quadruped = {
+            "device": {"platform": "raspberry_pi", "os": "linux"},
+            "interfaces": {"gpio": True, "i2c": True},
+            "devices": {"i2c": [{"bus": 1, "devices": [
+                {"address": "0x40", "candidates": ["PCA9685"]},
+                {"address": "0x68", "candidates": ["MPU6050"]},
+            ]}]},
+        }
+        self.assertEqual(auto_config.infer_profile_from_hardware(map_quadruped), "quadruped")
+
+        # 2. Pi with PCA9685 only -> robotic_arm
+        map_arm = {
+            "device": {"platform": "raspberry_pi", "os": "linux"},
+            "interfaces": {"gpio": True, "i2c": True},
+            "devices": {"i2c": [{"bus": 1, "devices": [
+                {"address": "0x40", "candidates": ["PCA9685"]},
+            ]}]},
+        }
+        self.assertEqual(auto_config.infer_profile_from_hardware(map_arm), "robotic_arm")
+
+        # 3. Pi with camera and no servos -> camera_node
+        map_cam = {
+            "device": {"platform": "raspberry_pi", "os": "linux"},
+            "interfaces": {"gpio": True, "i2c": False},
+            "devices": {"cameras": [{"device": "/dev/video0"}], "i2c": []},
+        }
+        self.assertEqual(auto_config.infer_profile_from_hardware(map_cam), "camera_node")
+
+        # 4. Config building
+        cfg = auto_config.build_config_for_profile("quadruped", custom_name="Custom Dog")
+        self.assertEqual(cfg["identity"]["profile"], "quadruped")
+        self.assertEqual(cfg["identity"]["name"], "Custom Dog")
+        self.assertIn("pca9685", cfg["configuration"])
+
+    def test_main_configuration_flags(self):
+        """Tests that automatic_detection and is_robot_project variables are present in main.py."""
+        import main
+        self.assertIsInstance(main.automatic_detection, bool)
+        self.assertIsInstance(main.is_robot_project, bool)
+        self.assertTrue(main.is_robot_project)
+        self.assertFalse(main.automatic_detection)
 
 
 if __name__ == "__main__":

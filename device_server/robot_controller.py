@@ -33,6 +33,14 @@ class RobotController:
         # Simulated 16-channel PCA9685 servo positions (0-15, angles 0-180 deg or None if de-energized)
         self.servo_angles: Dict[int, Optional[float]] = {i: None for i in range(16)}
 
+        # Active servo angle cache for Realtime 3D simulation mirroring (Section 3.1)
+        self.current_servo_angles: Dict[str, float] = {
+            "2": 110, "3": 70,  "4": 50,
+            "5": 110, "6": 110, "7": 150,
+            "8": 130, "9": 70,  "10": 40,
+            "11": 80, "12": 90, "13": 160,
+        }
+
         # Simulated WS281x 8-LED strip (GPIO 10)
         self.strip_leds: List[Dict[str, int]] = [{"r": 0, "g": 0, "b": 0} for _ in range(8)]
 
@@ -103,7 +111,15 @@ class RobotController:
         await self._drive_servos({name: 0 for name in self._servos}, duration_s=0.01)
         return {"stopped": True, "standing": False, "message": "Emergency stop triggered"}
 
-    # -- Section 3.2: Direct Servo Control (PCA9685 16-Channel) -----------
+    # -- Section 3.1: Direct Servo Control & Realtime Mirroring (PCA9685) -
+    async def get_servo_angles(self) -> Dict[str, Any]:
+        """Returns servo angles dictionary for 3D model realtime mirroring."""
+        print("[RobotController] get_servo_angles() called")
+        return {"servos": dict(self.current_servo_angles)}
+
+    def get_servo_angles_dict(self) -> Dict[str, float]:
+        """Helper to get current servo angles dictionary."""
+        return dict(self.current_servo_angles)
 
     async def driver_set_servo_angle_with_index(self, index: int, angle: float) -> Dict[str, Any]:
         """Sets angle of single servo channel (0-15, 0-180)."""
@@ -111,6 +127,7 @@ class RobotController:
         clamped_angle = max(0.0, min(180.0, float(angle)))
         if 0 <= idx < 16:
             self.servo_angles[idx] = clamped_angle
+            self.current_servo_angles[str(idx)] = clamped_angle
         print(f"[RobotController] driver_set_servo_angle_with_index() called with index={idx}, angle={clamped_angle}")
         return {"index": idx, "angle": clamped_angle, "status": "success"}
 
@@ -119,6 +136,7 @@ class RobotController:
         idx = int(index)
         if 0 <= idx < 16:
             self.servo_angles[idx] = 180.0
+            self.current_servo_angles[str(idx)] = 180.0
         print(f"[RobotController] snap_servo_left() called with index={idx}")
         return {"index": idx, "angle": 180.0, "status": "snapped_left"}
 
@@ -127,6 +145,7 @@ class RobotController:
         idx = int(index)
         if 0 <= idx < 16:
             self.servo_angles[idx] = 0.0
+            self.current_servo_angles[str(idx)] = 0.0
         print(f"[RobotController] snap_servo_right() called with index={idx}")
         return {"index": idx, "angle": 0.0, "status": "snapped_right"}
 
@@ -135,6 +154,7 @@ class RobotController:
         idx = int(index)
         if 0 <= idx < 16:
             self.servo_angles[idx] = 180.0
+            self.current_servo_angles[str(idx)] = 180.0
         print(f"[RobotController] pan_to_left() called with index={idx}")
         return {"index": idx, "angle": 180.0, "status": "panned_left"}
 
@@ -143,6 +163,7 @@ class RobotController:
         idx = int(index)
         if 0 <= idx < 16:
             self.servo_angles[idx] = 0.0
+            self.current_servo_angles[str(idx)] = 0.0
         print(f"[RobotController] pan_to_right() called with index={idx}")
         return {"index": idx, "angle": 0.0, "status": "panned_right"}
 
@@ -206,19 +227,42 @@ class RobotController:
         print("[RobotController] blink_warning() called")
         return {"status": "warning", "animation": "blink_warning"}
 
-    # -- Section 3.4: Piezo Buzzer Controls (GPIO 23) ---------------------
+    # -- Section 3.4: Audio Subsystem (Buzzer & Speaker) -----------------
 
     async def play_tone(self, tone: str = "C4") -> Dict[str, Any]:
         """Plays frequency using tone generator."""
         self.current_tone = str(tone)
         print(f"[RobotController] play_tone() called with tone={tone}")
-        return {"status": "playing", "tone": str(tone)}
+        return {"tone": str(tone), "status": "playing"}
 
     async def play_list_of_notes(self, notes: Any = None) -> Dict[str, Any]:
         """Plays melody sequence asynchronously."""
         note_list = list(notes) if isinstance(notes, (list, tuple)) else [str(notes or "C4")]
         print(f"[RobotController] play_list_of_notes() called with notes={note_list}")
-        return {"status": "playing_melody", "notes": note_list}
+        return {"notes": note_list, "status": "playing_melody"}
+
+    async def stop_tone(self) -> Dict[str, Any]:
+        """Silences the tonal buzzer immediately."""
+        self.current_tone = None
+        print("[RobotController] stop_tone() called")
+        return {"status": "stopped"}
+
+    async def play_audio(self, file_path: str = "") -> Dict[str, Any]:
+        """Plays audio file via speaker."""
+        path = str(file_path or "")
+        print(f"[RobotController] play_audio() called with file_path={path}")
+        return {"status": "playing", "file": path}
+
+    async def stop_audio(self) -> Dict[str, Any]:
+        """Halts speaker audio playback immediately."""
+        print("[RobotController] stop_audio() called")
+        return {"status": "stopped"}
+
+    async def set_volume(self, volume: float = 0.8) -> Dict[str, Any]:
+        """Sets speaker volume (0.0 to 1.0)."""
+        vol = max(0.0, min(1.0, float(volume)))
+        print(f"[RobotController] set_volume() called with volume={vol}")
+        return {"volume": vol, "status": "success"}
 
     # -- Section 3.5: MPU6050 IMU Telemetry (I2C 0x68) -------------------
 
@@ -345,6 +389,16 @@ class RobotController:
             turn_on = not ("off" in text or "kill" in text)
             await self.set_led(on=turn_on)
             return {"status": "executed", "action": "set_led", "message": f"LED turned {'on' if turn_on else 'off'}"}
+        elif "play" in text or "bark" in text or "music" in text or "sound" in text or "audio" in text:
+            await self.play_audio("/home/pi/audio/bark.wav")
+            return {"status": "executed", "action": "play_audio", "message": "Playing sound effect"}
+        elif "beep" in text or "tone" in text or "buzz" in text:
+            await self.play_tone("C4")
+            return {"status": "executed", "action": "play_tone", "message": "Played tone C4"}
+        elif "quiet" in text or "silence" in text or "stop sound" in text or "stop audio" in text:
+            await self.stop_audio()
+            await self.stop_tone()
+            return {"status": "executed", "action": "stop_audio", "message": "Audio silenced"}
         elif "walk" in text or "forward" in text or "backward" in text:
             direction = "backward" if "back" in text else ("left" if "left" in text else ("right" if "right" in text else "forward"))
             import re

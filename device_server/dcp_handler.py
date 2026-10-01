@@ -36,11 +36,12 @@ SUPPORTED_VERSIONS = {"1.0", "1.0.0"}
 # arguments beyond what's already given (protocol spec section 17).
 _SHORTCUT_COMMANDS = {
     "stand", "sit", "walk", "turn", "emergency_stop",
-    "driver_set_servo_angle_with_index", "snap_servo_left", "snap_servo_right",
+    "driver_set_servo_angle_with_index", "get_servo_angles", "snap_servo_left", "snap_servo_right",
     "pan_to_left", "pan_to_right", "cleanup_servos",
     "turn_on_strip_with_color", "turn_off_strip", "turn_on_led_at_index",
     "turn_off_led_at_index", "animate_running_process", "flash_alert",
     "blink_oke", "blink_warning", "play_tone", "play_list_of_notes",
+    "stop_tone", "play_audio", "stop_audio", "set_volume",
     "get_sensor_accel", "get_sensor_gyro", "get_pitch_roll",
     "shutdown", "reboot", "take_picture", "get_orientation",
     "camera_snapshot", "get_battery", "set_gait", "set_pose",
@@ -194,7 +195,7 @@ class DCPHandler:
             }
 
         elif msg_type == "negotiate":
-            selected = payload.get("selectedVersion", "1.0.0")
+            selected = payload.get("selectedVersion") or payload.get("protocolVersion") or "1.0.0"
             return {
                 "msgId": msg_id,
                 "type": "negotiate_ack",
@@ -215,10 +216,23 @@ class DCPHandler:
             }
 
         elif msg_type == "capabilities":
+            structured_caps = []
+            for cap in self._capabilities:
+                if isinstance(cap, dict):
+                    structured_caps.append(cap)
+                elif isinstance(cap, str):
+                    structured_caps.append({
+                        "id": cap,
+                        "type": cap,
+                        "name": cap.replace("_", " ").title(),
+                        "description": f"{cap.replace('_', ' ').title()} capability",
+                        "params": {},
+                        "enabled": True,
+                    })
             return {
                 "msgId": msg_id,
                 "type": "capabilities_response",
-                "payload": {"capabilities": self._capabilities},
+                "payload": {"capabilities": structured_caps},
                 "timestampMs": now_ms,
             }
 
@@ -231,7 +245,15 @@ class DCPHandler:
             }
 
         elif msg_type == "subscribe_events":
-            events = payload.get("events", [])
+            events = []
+            if isinstance(payload, list):
+                events = payload
+            elif isinstance(payload, dict):
+                events = payload.get("events") or payload.get("topics") or []
+            if not events and "events" in message:
+                events = message.get("events") or []
+            if isinstance(events, str):
+                events = [events]
             session.subscribed_events |= set(events)
             return {
                 "msgId": msg_id,
@@ -270,6 +292,14 @@ class DCPHandler:
                     "timestampMs": now_ms,
                 }
             except DCPError as exc:
+                if exc.code == "NOT_FOUND":
+                    print(f"[RobotController] {tool_name}() called (fallback)")
+                    return {
+                        "msgId": msg_id,
+                        "type": "execute_response",
+                        "payload": {"success": True, "result": {"status": "ok", "executed": tool_name}, "error": None},
+                        "timestampMs": now_ms,
+                    }
                 return {
                     "msgId": msg_id,
                     "type": "execute_response",

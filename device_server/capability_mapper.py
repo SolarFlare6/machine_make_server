@@ -43,25 +43,17 @@ class CapabilityMapper:
             capabilities.append({
                 "id": "robotics",
                 "type": "robotics",
-                "name": "Quadruped Kinematics & Servos",
-                "description": "16-channel PCA9685 servo driver with inverse kinematics",
+                "name": "PCA9685 Quadruped Kinematics",
+                "description": "16-channel I2C servo controller for quadruped articulation",
                 "params": {"channels": 16, "driver": "PCA9685"},
                 "enabled": True,
             })
             capabilities.append({
-                "id": "imu",
-                "type": "telemetry",
-                "name": "MPU6050 6-DOF IMU",
-                "description": "Accelerometer and Gyroscope over I2C 0x68",
-                "params": {"i2c_address": "0x68"},
-                "enabled": True,
-            })
-            capabilities.append({
-                "id": "lighting",
-                "type": "gpio",
-                "name": "WS281x LED Strip",
-                "description": "8 addressable RGB LEDs on GPIO 10",
-                "params": {"led_count": 8, "gpio_pin": 10},
+                "id": "audio",
+                "type": "audio",
+                "name": "Dual Audio System",
+                "description": "Pygame mixer speaker + GPIO 23 Tonal Buzzer",
+                "params": {"buzzer_pin": 23, "buzzer_gpio": 23, "mixer_backend": "pygame"},
                 "enabled": True,
             })
             capabilities.append({
@@ -73,10 +65,26 @@ class CapabilityMapper:
                 "enabled": True,
             })
             capabilities.append({
+                "id": "imu",
+                "type": "telemetry",
+                "name": "MPU6050 6-Axis IMU",
+                "description": "Accelerometer and Gyroscope over I2C 0x68",
+                "params": {"i2c_address": "0x68"},
+                "enabled": True,
+            })
+            capabilities.append({
+                "id": "lighting",
+                "type": "gpio",
+                "name": "WS281x RGB LED Plate",
+                "description": "8-pixel addressable LED strip on GPIO 10",
+                "params": {"led_count": 8, "gpio_pin": 10},
+                "enabled": True,
+            })
+            capabilities.append({
                 "id": "camera",
                 "type": "camera",
-                "name": "Pi Camera Module",
-                "description": "CSI or USB Camera feed",
+                "name": "Camera Feed",
+                "description": "RTSP/WebRTC or HTTP Snapshot Stream",
                 "params": {"stream_port": 8554},
                 "enabled": True,
             })

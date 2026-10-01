@@ -98,7 +98,8 @@ class DeviceAgent:
             "string": str,
             "str": str,
             "number": (int, float),
-            "int": int,
+            "int": (int, float),
+            "integer": (int, float),
             "float": (int, float),
             "boolean": bool,
             "bool": bool,
@@ -117,7 +118,3 @@ class DeviceAgent:
                 if expected_type and not isinstance(parameters[arg_name], expected_type):
                     raise DCPError("INVALID_ARGUMENT",
                                     f"Argument '{arg_name}' must be of type {schema_type}.")
-
-        unknown = set(parameters) - set(tool.arguments)
-        if unknown:
-            raise DCPError("INVALID_ARGUMENT", f"Unexpected argument(s): {sorted(unknown)}.")

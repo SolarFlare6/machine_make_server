@@ -30,13 +30,36 @@ logger = logging.getLogger("main")
 
 WIFI_PORT = 8765
 
+# params
+#python main.py --auto-detect (enables auto-detection for this run)
+#python main.py --setup (launches the interactive setup wizard)
+#python main.py --robot (forces quadruped robot mode)
+#python main.py --no-robot (disables forced quadruped mode)
+
+
 # setup vars
-automatic_detection = True  # Set to True to run the new hardware auto-detection implementation; False runs the old implementation
-is_robot_project = False     # Set to True to configure the server for your Quadruped Robot project
+automatic_detection = True # Set to True to run the new hardware auto-detection implementation; False runs the old implementation
+is_robot_project = False # Set to True to configure the server for your Quadruped Robot project
 
 # Uppercase aliases for convenience:
 AUTOMATIC_DETECTION = automatic_detection
 IS_ROBOT_PROJECT = is_robot_project
+
+
+def configure_robot_project_config(config_file: Optional[str] = None, custom_name: Optional[str] = None) -> ConfigurationManager:
+    """Configures and writes device_config.json with the full Quadruped Robot configuration."""
+    from auto_config import build_config_for_profile
+    mgr = ConfigurationManager(config_file) if config_file else ConfigurationManager()
+    quad_name = custom_name or mgr.identity.get("name") or "MachineMake Quadruped Dog"
+    robot_cfg = build_config_for_profile("quadruped", custom_name=quad_name)
+    existing_id = mgr.identity.get("device_id")
+    if existing_id:
+        robot_cfg["identity"]["device_id"] = existing_id
+    mgr._config = robot_cfg
+    mgr.save()
+    logger.info("Configured %s for Quadruped Robot.", mgr._config_file)
+    return mgr
+
 
 async def console_loop(
     pairing_manager: PairingManager,
@@ -158,6 +181,13 @@ async def telemetry_loop(
                 "gyro": {"x": 0.2, "y": -0.5, "z": 0.1},
             }
 
+            servo_data = robot_controller.get_servo_angles_dict() if robot_controller else {
+                "2": 110, "3": 70, "4": 50,
+                "5": 110, "6": 110, "7": 150,
+                "8": 130, "9": 70, "10": 40,
+                "11": 80, "12": 90, "13": 160,
+            }
+
             telemetry_data = {
                 "cpu": round(cpu_val, 1),
                 "ram": round(ram_val, 1),
@@ -167,6 +197,7 @@ async def telemetry_loop(
                 "battery": None,
                 "voltage": None,
                 "imu": imu_data,
+                "servos": servo_data,
             }
             await event_manager.emit("telemetry", telemetry_data)
         except asyncio.CancelledError:
@@ -212,11 +243,17 @@ async def run(
             device_type="robot",
             device_id=device_id or identity_cfg.get("device_id"),
         )
+
+        # Configure and persist device_config.json for the Quadruped Robot
+        from auto_config import build_config_for_profile
+        robot_cfg = build_config_for_profile("quadruped", custom_name=quad_name)
+        if identity.device_id:
+            robot_cfg["identity"]["device_id"] = identity.device_id
+        config._config = robot_cfg
+        config.save()
+        logger.info("Configured %s with Quadruped Robot configuration.", config._config_file)
+
         physical_config = dict(config.physical_configuration)
-        # Ensure quadruped leg servos and IMU are mapped
-        if "servos" not in physical_config:
-            from auto_config import PROFILES
-            physical_config.update(PROFILES["quadruped"]["configuration"])
 
     elif should_auto_detect or setup_mode or not os.path.isfile(config._config_file):
         # New implementation: Hardware-scan auto-detection / Setup wizard

@@ -29,13 +29,15 @@ class ToolDefinition:
     safety_constraints: Dict[str, Any] = field(default_factory=dict)
 
     def to_dcp(self) -> Dict[str, Any]:
-        """Serialize exactly as dcp_protocol_specification.txt section 15
-        shows (no handler, no internal safety_constraints -- those are
-        server-internal)."""
+        """Serialize as dcp_protocol_specification.txt section 15 shows,
+        with toolName/parameters aliases for mobile app client compatibility."""
         return {
             "name": self.name,
+            "toolName": self.name,
             "description": self.description,
             "arguments": self.arguments,
+            "parameters": self.arguments,
+            "params": self.arguments,
             "permission": self.permission,
         }
 
@@ -133,8 +135,16 @@ class ToolRegistry:
                 handler=lambda **kw: robot_controller.emergency_stop(),
             ))
 
-        # -- Section 3.2: Direct Servo Control (PCA9685 16-Channel) ------
+        # -- Section 3.1: Servo Control & Realtime Mirroring (PCA9685) ------
         if "robotics" in cap_ids or "pwm" in cap_ids or robot_controller is not None:
+            self.register(ToolDefinition(
+                name="get_servo_angles",
+                description="Returns current angles across quadruped servo channels for realtime 3D simulation mirroring.",
+                arguments={},
+                permission="READ_ONLY",
+                handler=lambda **kw: robot_controller.get_servo_angles(),
+            ))
+
             self.register(ToolDefinition(
                 name="driver_set_servo_angle_with_index",
                 description="Sets angle of single servo channel (0-15, 0-180 deg).",
@@ -271,13 +281,13 @@ class ToolRegistry:
                 handler=lambda **kw: robot_controller.blink_warning(),
             ))
 
-        # -- Section 3.4: Piezo Buzzer Controls (GPIO 23) ----------------
+        # -- Section 3.1: Audio Subsystem (Buzzer & Speaker) ------------
         if "buzzer" in cap_ids or "audio" in cap_ids or robot_controller is not None:
             self.register(ToolDefinition(
                 name="play_tone",
-                description="Plays frequency/note on piezo buzzer.",
+                description="Plays frequency/note on piezo buzzer (e.g. 'C4', 'A4').",
                 arguments={
-                    "tone": {"type": "string", "required": True},
+                    "tone": {"type": "string", "required": False},
                 },
                 permission="CONTROL",
                 handler=lambda tone="C4", **kw: robot_controller.play_tone(tone=tone),
@@ -285,12 +295,48 @@ class ToolRegistry:
 
             self.register(ToolDefinition(
                 name="play_list_of_notes",
-                description="Plays melody sequence of notes asynchronously.",
+                description="Plays melody sequence of notes on tonal buzzer.",
                 arguments={
-                    "notes": {"type": "list", "required": True},
+                    "notes": {"type": "list", "required": False},
                 },
                 permission="CONTROL",
-                handler=lambda notes=None, **kw: robot_controller.play_list_of_notes(notes=notes or ["C4"]),
+                handler=lambda notes=None, **kw: robot_controller.play_list_of_notes(notes=notes or ["C4", "E4", "G4", "C5"]),
+            ))
+
+            self.register(ToolDefinition(
+                name="stop_tone",
+                description="Silences the tonal buzzer immediately.",
+                arguments={},
+                permission="CONTROL",
+                handler=lambda **kw: robot_controller.stop_tone(),
+            ))
+
+            self.register(ToolDefinition(
+                name="play_audio",
+                description="Plays audio file on the speaker.",
+                arguments={
+                    "file_path": {"type": "string", "required": False},
+                },
+                permission="CONTROL",
+                handler=lambda file_path="", **kw: robot_controller.play_audio(file_path=file_path),
+            ))
+
+            self.register(ToolDefinition(
+                name="stop_audio",
+                description="Halts speaker audio playback immediately.",
+                arguments={},
+                permission="CONTROL",
+                handler=lambda **kw: robot_controller.stop_audio(),
+            ))
+
+            self.register(ToolDefinition(
+                name="set_volume",
+                description="Sets speaker playback volume (0.0 to 1.0).",
+                arguments={
+                    "volume": {"type": "number", "required": False},
+                },
+                permission="CONTROL",
+                handler=lambda volume=0.8, **kw: robot_controller.set_volume(volume=volume),
             ))
 
         # -- Section 3.5: MPU6050 IMU Telemetry (I2C 0x68) ---------------

@@ -960,6 +960,154 @@ class TestPairingAndBluetooth(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(main.is_robot_project)
         self.assertFalse(main.automatic_detection)
 
+    def test_robot_project_configures_device_config(self):
+        """Tests that when is_robot_project is True, device_config.json is configured for the quadruped."""
+        import main
+        test_cfg_path = "config/test_quadruped_config.json"
+        if os.path.exists(test_cfg_path):
+            os.remove(test_cfg_path)
+
+        mgr = main.configure_robot_project_config(config_file=test_cfg_path, custom_name="Test Quadruped")
+        self.assertTrue(os.path.exists(test_cfg_path))
+        self.assertEqual(mgr.identity["profile"], "quadruped")
+        self.assertEqual(mgr.identity["type"], "robot")
+        self.assertEqual(mgr.identity["name"], "Test Quadruped")
+
+        # Check physical configuration
+        cfg = mgr.physical_configuration
+        self.assertIn("pca9685", cfg)
+        self.assertIn("servos", cfg)
+        self.assertEqual(cfg["servos"]["fl_hip"]["channel"], 2)
+        self.assertEqual(cfg["servos"]["br_lower"]["channel"], 13)
+        self.assertEqual(cfg["imu"]["address"], "0x68")
+        self.assertEqual(cfg["lighting"]["gpio_pin"], 10)
+        self.assertEqual(cfg["audio"]["buzzer_pin"], 23)
+
+        if os.path.exists(test_cfg_path):
+            os.remove(test_cfg_path)
+
+    async def test_audio_subsystem_tools(self):
+        """Tests Section 3.1 Audio Subsystem (Buzzer & Speaker) tool implementations."""
+        session = self.session_manager.create_session(lambda msg: None)
+        session.authenticated = True
+        session.permission = "CONTROL"
+
+        # 1. play_tone
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 301,
+            "command": "play_tone", "arguments": {"tone": "A4"},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["tone"], "A4")
+
+        # 2. stop_tone
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 302,
+            "command": "stop_tone", "arguments": {},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["status"], "stopped")
+
+        # 3. play_audio
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 303,
+            "command": "play_audio", "arguments": {"file_path": "/home/pi/audio/bark.wav"},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["file"], "/home/pi/audio/bark.wav")
+
+        # 4. stop_audio
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 304,
+            "command": "stop_audio", "arguments": {},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["status"], "stopped")
+
+        # 5. set_volume
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 305,
+            "command": "set_volume", "arguments": {"volume": 0.75},
+        })
+        self.assertTrue(resp["success"])
+        self.assertEqual(resp["data"]["result"]["volume"], 0.75)
+
+    async def test_format_b_audio_and_resilience(self):
+        """Tests Format B execute calls for audio tools and fallback resilience."""
+        session = self.session_manager.create_session(lambda msg: None)
+
+        # Format B execute play_audio
+        resp = await self.dcp_handler.handle(session, {
+            "msgId": "audio-exec-1",
+            "type": "execute",
+            "payload": {
+                "toolName": "play_audio",
+                "params": {"file_path": "/home/pi/audio/hello.wav"},
+            },
+        })
+        self.assertEqual(resp["type"], "execute_response")
+        self.assertTrue(resp["payload"]["success"])
+        self.assertEqual(resp["payload"]["result"]["file"], "/home/pi/audio/hello.wav")
+
+        # Format B execute stop_tone
+        resp = await self.dcp_handler.handle(session, {
+            "msgId": "audio-exec-2",
+            "type": "execute",
+            "payload": {
+                "toolName": "stop_tone",
+                "params": {},
+            },
+        })
+        self.assertEqual(resp["type"], "execute_response")
+        self.assertTrue(resp["payload"]["success"])
+        self.assertEqual(resp["payload"]["result"]["status"], "stopped")
+
+        # Format B execute fallback for unmapped tool
+        resp = await self.dcp_handler.handle(session, {
+            "msgId": "unknown-tool-1",
+            "type": "execute",
+            "payload": {
+                "toolName": "custom_extension_tool",
+                "params": {"foo": "bar"},
+            },
+        })
+        self.assertEqual(resp["type"], "execute_response")
+        self.assertTrue(resp["payload"]["success"])
+        self.assertEqual(resp["payload"]["result"]["executed"], "custom_extension_tool")
+
+    async def test_realtime_mirroring_get_servo_angles(self):
+        """Tests Section 3.1 get_servo_angles endpoint for Realtime Mirroring."""
+        session = self.session_manager.create_session(lambda msg: None)
+        session.authenticated = True
+        session.permission = "CONTROL"
+
+        # 1. Format A request
+        resp = await self.dcp_handler.handle(session, {
+            "dcp": "1.0", "type": "request", "id": 401,
+            "command": "get_servo_angles", "arguments": {},
+        })
+        self.assertTrue(resp["success"])
+        servos = resp["data"]["result"]["servos"]
+        self.assertEqual(servos["2"], 110)
+        self.assertEqual(servos["3"], 70)
+        self.assertEqual(servos["4"], 50)
+        self.assertEqual(servos["13"], 160)
+
+        # 2. Format B execute request
+        resp_b = await self.dcp_handler.handle(session, {
+            "msgId": "mirror-req-1",
+            "type": "execute",
+            "payload": {
+                "toolName": "get_servo_angles",
+                "params": {},
+            },
+        })
+        self.assertEqual(resp_b["type"], "execute_response")
+        self.assertTrue(resp_b["payload"]["success"])
+        servos_b = resp_b["payload"]["result"]["servos"]
+        self.assertEqual(servos_b["2"], 110)
+        self.assertEqual(servos_b["7"], 150)
+
 
 if __name__ == "__main__":
     unittest.main()

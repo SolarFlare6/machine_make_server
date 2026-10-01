@@ -26,6 +26,32 @@ from session import Session, SessionManager
 logger = logging.getLogger("websocket_transport")
 
 
+class ProbeHandshakeFilter(logging.Filter):
+    """
+    Suppresses noisy 'opening handshake failed' traceback logs caused by port scans
+    or TCP probes (such as the mobile app scanning the local subnet).
+    These probes open a raw TCP socket to check if port 8765 is listening and
+    immediately close it without completing an HTTP/WebSocket upgrade handshake.
+    """
+    def filter(self, record: logging.LogRecord) -> bool:
+        if "opening handshake failed" in record.getMessage():
+            logger.debug(
+                "Suppressed probe connection handshake error: %s",
+                record.exc_info[1] if record.exc_info and record.exc_info[1] else record.getMessage()
+            )
+            return False
+        return True
+
+
+def apply_probe_filter() -> None:
+    ws_logger = logging.getLogger("websockets.server")
+    if not any(isinstance(f, ProbeHandshakeFilter) for f in ws_logger.filters):
+        ws_logger.addFilter(ProbeHandshakeFilter())
+
+
+apply_probe_filter()
+
+
 class WiFiDCPServer:
     def __init__(self, dcp_handler: DCPHandler, session_manager: SessionManager,
                  host: str = "0.0.0.0", port: int = 8765):
@@ -36,6 +62,7 @@ class WiFiDCPServer:
         self._server = None
 
     async def start(self) -> None:
+        apply_probe_filter()
         self._server = await websockets.serve(self._on_connect, self._host, self._port)
         logger.info("Wi-Fi DCP server listening on ws://%s:%s", self._host, self._port)
 
